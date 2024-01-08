@@ -1,0 +1,216 @@
+---
+title: 'Code Compendium: Loudon et al. Manuscript'
+author: "C. Wolfe"
+date: "`r Sys.Date()`"
+output: 
+  rmdformats::readthedown
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Rationale
+This document complements the manuscript, "Healing Hanuman’s Army: Veterinary Care as a Core Component of One Health Principles in a Southeast Asian Monkey Forest" written by Loudon et al and in preparation for **Animals**.  
+  
+Assuming a working version of the R programming language, the code that follows will replicate all steps necessary to recreate the results in the paper. Questions about access to the necessary data files should be directed to James Loudon, PhD, East Carolina University. Questions about the statistical analyses should be directed to Christopher Wolfe, PhD, East Carolina University. 
+
+## Statistical Analyses
+The remainder of this document can be divided into 3 broad sections: 1) Initial Data Preparation, 2) Model Fit, Validation, and Selection, and 3) Manuscript Results.   
+
+### Initial Data Preparation
+Here we load in the requisite packages and organize the data for analysis. We make sure all of our categories are represented as factors and create a new colomun entitled "symptom". This new column is the variable of interest ($y$) and encapsulates the binary or dichotomous nature of the possible outcomes for each macaque that is seen at the clinic: Injury or Death. 
+
+#### Load Requisite Packages
+```{r packages}
+library(tidyverse) ## Data Wrangling and Organization
+library(magrittr) ## Additional tools for Data Wrangling
+library(brms) ## Bayesian Modeling with Hamiltonian Monte Carlo (Stan)
+library(bayesplot)
+library(tidybayes)
+library(broom)
+library(broom.mixed)
+library(visibly)
+color_scheme_set("red")
+cmdstanr::set_cmdstan_path("C:/Users/chris/Documents_Local/cmdstan-2.33.1")
+```
+
+#### Import Data and Wrangle for Clarity
+```{r data import}
+dat <- read.csv("macaque_injury_raw.csv") ## Import Data
+colnames(dat) <- c("year","age", "age_class", "sex", "group", "fight", "anthropogenic","injury", "death") ## Change column names for clarity
+```
+
+```{r clean up data file}
+## Clean up the data file and make all predictors factors instead of characters
+dat %<>% select(year, age_class, sex, group, fight, anthropogenic, death) %>% mutate(year = factor(year), age_class = factor(age_class, levels = c("0-1 year ", "1-4 years", "5-9 years", "10-15 years", "16+ years")), sex = if_else(sex == "F",0,1), sex = factor(sex), group = factor(group), fight = if_else(fight == "no",0,1), fight = factor(fight), anthropogenic = if_else(anthropogenic=="natural",0,1), anthropogenic = factor(anthropogenic), symptom = if_else(death=="no",0,1))
+
+head(dat,3)
+```
+
+### Model Fit, Validation, and Selection
+
+Here we fit 3 model constructions. The general construction of all models is as follows: $y \sim Bernoulli(\theta)$ where $y$ is the occurrence of injury or death and $\theta$ is the probability of dying. Each code chunk shows model fit, a summary of the output, and stores a `loo` object to be used for model comparison below. 
+
+#### Model 1: Baseline Model - Intercept Only
+$\mu_{i} = X\beta + \epsilon$, where $\beta_0$ is an intercept sampled as part of the model. $\epsilon$ is the error term. Here, I exclude all population-level parameters.  
+
+```{r baseline  model, cache=TRUE}
+base <- brm(formula = symptom ~ 1, data=dat, family = bernoulli(link = "logit"), chains = 4, cores=4, backend = "cmdstanr")
+
+summary(base)
+
+loo_base <- loo(base)
+```
+
+#### Model 2: Fixed Effects Only
+$\mu_{i} = X\beta + \epsilon$, where $\beta$ is a $p-by-1$ vector of population level effects including age class, sex, group, fighting, anthropogenic, and year. $\epsilon$ is the error term.  
+
+```{r fixed model, cache=T}
+fixed <- brm(formula = symptom ~ 1 + age_class + sex + group + fight + anthropogenic + year, data=dat, family = bernoulli(link = "logit"), chains = 4, cores=4, backend = "cmdstanr")
+
+summary(fixed)
+
+loo_fixed <- loo(fixed)
+```
+
+#### Model 3: Multilevel Model
+$\mu_{i} = X\beta + Zb + \epsilon$, where $\beta$ is a $p-by-1$ vector of population level effects including age class, sex, group, fighting, anthropogenic, and year, $Z$ is $n-by-1$ random effects design matrix such that the probability of death is the result of group level variation across social groups and study year. $\epsilon$ is the error term.  
+
+```{r mixed model, cache=T}
+mixed <- brm(formula = symptom ~ 1 + age_class + sex + fight + anthropogenic + year +(1 + year|group), data=dat, family = bernoulli(link = "logit"), chains = 4, cores=4, prior = c(set_prior("normal(1,1)", class = "Intercept"),set_prior("normal(0,1)", class = "b"), set_prior("normal(0,1)", class = "sd")), control = list(adapt_delta = 0.95), backend = "cmdstanr")
+
+summary(mixed)
+
+loo_mixed <- loo(mixed)
+```
+
+#### Model Selection
+
+Here we use the three models fit above and determine the best-fitting model using ELPD from the `loo` package. 
+
+```{r}
+loo_compare(loo_base, loo_fixed, loo_mixed)
+```
+
+The results above suggest the hierarchical or mixed effects model is best. That is to say, the occurrence of an injury or death at the Ubud National Forest is the results of population-level effects including sex, age class, whether one was fighting or not, and whether the reason for the vet visit was anthropogenic or natural in origin. Further, these effects vary across each of the 6 groups over all 4 years of the study project.  
+  
+The remainder of this document will assume the mixed effects as best and base all additional analyses from this model.  
+
+#### Model Validation - Posterior Predictive Check
+Here, I use the model to predict the outcomes across each of the predictors (fixed and random effects). Note, in the age class data the predictive line does encapsulate the true prediction it is just inside the 95th highest posterior density. The reason for this "outlier" is the lack of data in this age class across the sample - only 3 total and 2 were injured 1 was dead. 
+
+
+```{r ppc}
+
+## ungrouped
+ppc_bars(y = dat$symptom,yrep = posterior_predict(mixed, ndraws=500), prob = 0.95) + scale_x_continuous(breaks = c(0:1), labels = paste0(c("Injury", "Death")))
+
+## year
+ppc_bars_grouped(y = dat$symptom,yrep = posterior_predict(mixed, ndraws=500), prob = 0.95, group = dat$year, facet_args = list(scales = "free")) + scale_x_continuous(breaks = c(0:1), labels = paste0(c("Injury", "Death")))
+
+## age class
+ppc_bars_grouped(y = dat$symptom,yrep = posterior_predict(mixed, ndraws=500), prob = 0.95, group = dat$age_class, facet_args = list(scales = "free")) + scale_x_continuous(breaks = c(0:1), labels = paste0(c("Injury", "Death")))
+
+## sex
+ppc_bars_grouped(y = dat$symptom,yrep = posterior_predict(mixed, ndraws=500), prob = 0.95, group = dat$sex) + scale_x_continuous(breaks = c(0:1), labels = paste0(c("Injury", "Death"))) + facet_wrap("group", labeller = as_labeller(c("0" = "Female", "1" = "Male")), scales = "free")
+
+## group
+ppc_bars_grouped(y = dat$symptom,yrep = posterior_predict(mixed, ndraws=500), prob = 0.95, group = dat$group, facet_args = list(scales = "free")) + scale_x_continuous(breaks = c(0:1), labels = paste0(c("Injury", "Death")))
+
+## fight
+ppc_bars_grouped(y = dat$symptom,yrep = posterior_predict(mixed, ndraws=500), prob = 0.95, group = dat$fight, facet_args = list(scales = "free")) + scale_x_continuous(breaks = c(0:1), labels = paste0(c("Injury", "Death"))) + facet_wrap("group", labeller = as_labeller(c("0" = "No Fighting", "1" = "Fighting")), scales = "free")
+
+## anthropogenic
+ppc_bars_grouped(y = dat$symptom,yrep = posterior_predict(mixed, ndraws=500), prob = 0.95, group = dat$anthropogenic) + scale_x_continuous(breaks = c(0:1), labels = paste0(c("Injury", "Death"))) + facet_wrap("group", labeller = as_labeller(c("0" = "Natural", "1" = "Anthropogenic")), scales = "free")
+```
+
+## Manuscript Results
+The above code suggests we have a well-formed description of the data generating process where the probability of injury or death is the result of several population- and and group-level effects. The `loo` results and the posterior predictive check suggests the model does a good job recovering each set of relationships.  
+  
+    
+The remainder of this document provides a broad set of results to highlight the various relationships present across the data. 
+
+### General Model Results
+
+#### Full Model Coefficients
+Here I again provide the general summary of all parameters sampled in the model. I also include the densities and traceplots of each for completeness - these show the estimate, variation in the estimate, and provide validity for each parameter. Note, these are on the log scale. Remember this is a logistic regression model where 0 = injury and 1 = death. All values relate to the probability of being found dead with the inverse being the probability of being found injured.  
+  
+
+Group Effects: sd() = standard deviation in the group level terms. The higher the value, the more variation between each social group over each year. 2017 shows the largest levels of variation between groups. cor() = the relationship between year and group on the scale -1 to 1. In general, there is little to no yearly trend between the groups.  
+  
+
+
+Population Effects: Each of these coefficients are on the log scale. A negative number assumes a decrease in log odds while a positive number assumes an increase in log odds. All numbers are in the context of the reference category. For instance, the `sex1` covariates relate to the odds of male macaques being found dead. Because this is a logistic regression model, if the covariate assumes a decrease in the odds of death, than the opposite is also true - an increase in the odds of being injured.
+
+```{r text summary}
+summary(mixed)
+```
+
+```{r plot summary}
+plot(mixed)
+```
+
+#### Effects
+The above information is helpful, but the log scale is difficult to interpret. Here I exponentiate the results to put them on the probability scale. This gives us the traditional interpretation of the logistic regression: an odds ratio. Any value below 1 is a decrease in odds and any value above 1 is an increase in odds. I will present both the odds ratio (OR) associated with the odds of being found dead and the inverse of the odds ratio 1/OR associated with the odds of being found injured. Again, all comparisons are made in reference to the broader category of reference. 
+
+```{r inverse equation}
+func <- function(x){
+  1/exp(x)
+}
+```
+
+
+
+##### Population Level or Fixed Effects
+```{r fixed effects}
+fixef(mixed) %>% exp() %>% round(digits = 2)
+fixef(mixed) %>% func() %>% round(digits = 2)
+
+```
+
+**Interpretation**  
+  
+1. 10 to 15 year olds are most likely to be injured, while 0-1 year olds are most likely to be found dead  
+2. Females are more likely to be found dead, while males are more likely to be injured.  
+3. Fighting leads to more injuries as compared to deaths  
+4. Anthropogenic factors are more likely to cause death, while natural causes lead to injury.  
+5. 2017 saw the greatest odds of death, while 2016 led to the greatest odds of injury.   
+  
+
+##### Group level or random effects
+Each of the effects described above relates to an overall population-level effect. In other words, regardless of year or group, there are differences based on sex, age class, fighting or not, and natural vs. anthropogenic.  
+  
+However, there is a time component and group level of variation. Perhaps the probability of death (or injury) varies based on one's social group (and resulting access to humans) and each year.  
+
+```{r prep ranefs}
+rans <- ranef(mixed)
+y2015 <- rans$group[,,1][,c(1,3:4)]
+y2016 <- rans$group[,,2][,c(1,3:4)]
+y2017 <- rans$group[,,3][,c(1,3:4)]
+y2018 <- rans$group[,,4][,c(1,3:4)]
+
+grps <- rbind(y2015, y2016, y2017, y2018)
+grps <- as.data.frame(grps)
+grps %<>% exp() %>% round(digits=2)
+grps$year <- c(rep(c("2015","2016","2017","2018"), each=6))
+grps$group <- c(rep(c("Cemetery","Central","East","Michelin","New Forest","Temple"), times=1))
+
+rownames(grps) <- c(1:24)
+
+grps
+```
+
+```{r plot ranef}
+grps %>% ggplot() + geom_pointrange(aes(x = group,y=Estimate,ymin = Q2.5, ymax=Q97.5)) + facet_wrap(vars(year), scales = "free") + geom_hline(yintercept = 1) +theme_bw()
+```
+
+**Interpretation**  
+  
+In general, there are minor yearly differences across each group related to mortality/death. The odds of death were highest in 2017 at Michelin, New Forest, and the Cemetery. Alternatively, the highest odds of injury were in 2017 at Temple, East, and Central. In fact, in general, Temple had the highest odds of injury across all 4 years. 
+
+## Summary
+
+In general, the results suggest that the veterinary caseload at the Ubud Monkey Forest as it relates to morbidity and/or mortality is influenced by the sex of the macaque, age class, whether they fought or not, whether the reason was anthropogenic or natural, and such events vary across groups for each study year. 
